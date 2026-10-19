@@ -1,3 +1,9 @@
+Compile
+
+`gcc keymouse.c btlib.c -lbluetooth -o keymouse`
+
+Set-up systemd service
+
 ```
 sudo nano /etc/systemd/system/keymouse.service
 ```
@@ -19,3 +25,5 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 ```
+
+This version have additional support for USB KM/KVM switches like (ATEN US224), periodically checking if device was reconnected.
