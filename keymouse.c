@@ -10,8 +10,9 @@ Edit keymouse.txt to set ADDRESS=
 to the address of the local device
 that runs this code
 
-The Linux input devices are set by KEYBOARD_DEVICE and MOUSE_DEVICE below.
-These defaults use the SteelSeries Prime keyboard and mouse.
+The Linux input devices are set by KEYBOARD_DEVICE, MOUSE_DEVICE and
+VOLUME_DEVICE below. The volume controls are read from the keyboard's
+separate consumer-control input device.
 If a USB switch disconnects them, the program retries opening them every second.
 
 Compile
@@ -22,7 +23,7 @@ Run
 
 Connect from phone/tablet/PC to "HID" device
 
-Keystrokes and mouse data sent to client
+Keystrokes, mouse data and volume controls sent to client
 F10 sends "Hello" plus Enter
 The mouse moves slightly right, left, up and down every 20 seconds
 
@@ -51,16 +52,19 @@ int send_mouse(char x,char y,char but,char wheel);
 
 #define KEYBOARD_DEVICE "/dev/input/by-id/usb-SteelSeries_SteelSeries_Apex_3-event-kbd"
 #define MOUSE_DEVICE "/dev/input/by-id/usb-SteelSeries_SteelSeries_Prime-if01-event-mouse"
+#define VOLUME_DEVICE "/dev/input/by-id/usb-SteelSeries_SteelSeries_Apex_3-event-if02"
 #define INPUT_RETRY_TICKS 50
 #define MOUSE_JIGGLE_INTERVAL_TICKS 1000
 
-unsigned char reportmap[101] = {0x05,0x01,0x09,0x06,0xA1,0x01,0x85,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,
+unsigned char reportmap[132] = {0x05,0x01,0x09,0x06,0xA1,0x01,0x85,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,
                                0x25,0x01,0x75,0x01,0x95,0x08,0x81,0x02,0x95,0x01,0x75,0x08,0x81,0x01,0x95,0x06,
                                0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,0x19,0x00,0x29,0x65,0x81,0x00,0xC0,
                                0x05,0x01,0x09,0x02,0xA1,0x01,0x85,0x02,0x09,0x01,0xA1,0x00,0x05,0x09,0x19,0x01,
                                0x29,0x05,0x15,0x00,0x25,0x01,0x95,0x05,0x75,0x01,0x81,0x02,0x95,0x01,0x75,0x03,
                                0x81,0x01,0x05,0x01,0x09,0x30,0x09,0x31,0x09,0x38,0x15,0x81,0x25,0x7F,0x75,0x08,
-                               0x95,0x03,0x81,0x06,0xC0,0xC0};
+                               0x95,0x03,0x81,0x06,0xC0,0xC0,
+                               0x05,0x0C,0x09,0x01,0xA1,0x01,0x85,0x03,0x15,0x00,0x25,0x01,0x09,0xE9,0x09,0xEA,
+                               0x09,0xE2,0x75,0x01,0x95,0x03,0x81,0x02,0x75,0x05,0x95,0x01,0x81,0x03,0xC0};
 
 unsigned char report[8] = {0,0,0,0,0,0,0,0};
 unsigned char *name = "HID"; 
@@ -68,17 +72,19 @@ unsigned char appear[2] = {0xC1,0x03};  // 03C1 = keyboard icon appears on conne
 unsigned char pnpinfo[7] = {0x02,0x6B,0x1D,0x46,0x02,0x37,0x05};
 unsigned char protocolmode[1] = {0x01};
 unsigned char hidinfo[4] = {0x01,0x11,0x00,0x02};
-int keyboard_fd = -1,mouse_fd = -1;
+int keyboard_fd = -1,mouse_fd = -1,volume_fd = -1;
 unsigned char keyboard_modifiers = 0;
 unsigned char keyboard_keys[6] = {0,0,0,0,0,0};
 unsigned char mouse_buttons = 0;
-int keyboard_retry_ticks = 0,mouse_retry_ticks = 0;
+int keyboard_retry_ticks = 0,mouse_retry_ticks = 0,volume_retry_ticks = 0;
 int mouse_jiggle_ticks = 0,mouse_jiggle_step = 0;
 
 int linux_key_to_hid(int key);
 int send_keyboard_report(void);
+int send_volume_report(int key);
 void read_keyboard(void);
 void read_mouse(void);
+void read_volume(void);
 void jiggle_mouse(void);
 void close_input_devices(void);
 void open_input_devices(int log_failures);
@@ -166,12 +172,17 @@ int lecallback(int clientnode,int op,int cticn)
       printf("Connected OK. Mouse sent to client; keyboard unavailable. ESC stops server\n");
     else
       printf("Connected OK. Keyboard and mouse unavailable. ESC stops server\n");
+    if(volume_fd >= 0)
+      printf("Volume controls sent to client\n");
+    else
+      printf("Volume controls unavailable\n");
     }
   if(op == LE_TIMER)
     {
     retry_input_devices();
     read_keyboard();
     read_mouse();
+    read_volume();
     jiggle_mouse();
     }
   if(op == LE_DISCONNECT)
@@ -188,10 +199,14 @@ void close_input_devices(void)
     close(keyboard_fd);
   if(mouse_fd >= 0)
     close(mouse_fd);
+  if(volume_fd >= 0)
+    close(volume_fd);
   keyboard_fd = -1;
   mouse_fd = -1;
+  volume_fd = -1;
   keyboard_retry_ticks = 0;
   mouse_retry_ticks = 0;
+  volume_retry_ticks = 0;
   keyboard_modifiers = 0;
   memset(keyboard_keys,0,sizeof(keyboard_keys));
   mouse_buttons = 0;
@@ -217,6 +232,14 @@ void open_input_devices(int log_failures)
     else if(log_failures)
       printf("Failed to open %s: %s (will retry)\n",MOUSE_DEVICE,strerror(errno));
     }
+  if(volume_fd < 0)
+    {
+    volume_fd = open(VOLUME_DEVICE,O_RDONLY | O_NONBLOCK);
+    if(volume_fd >= 0)
+      printf("Opened volume control input %s\n",VOLUME_DEVICE);
+    else if(log_failures)
+      printf("Failed to open %s: %s (will retry)\n",VOLUME_DEVICE,strerror(errno));
+    }
   }
 
 void retry_input_devices(void)
@@ -229,6 +252,11 @@ void retry_input_devices(void)
   if(mouse_fd < 0 && ++mouse_retry_ticks >= INPUT_RETRY_TICKS)
     {
     mouse_retry_ticks = 0;
+    open_input_devices(0);
+    }
+  if(volume_fd < 0 && ++volume_retry_ticks >= INPUT_RETRY_TICKS)
+    {
+    volume_retry_ticks = 0;
     open_input_devices(0);
     }
   }
@@ -353,6 +381,40 @@ int send_keyboard_report(void)
   return(1);
   }
 
+int send_volume_report(int key)
+  {
+  unsigned char uuid[2],buf[1];
+  static int reportindex = -1;
+
+  if(reportindex < 0)
+    {
+    uuid[0] = 0x2A;
+    uuid[1] = 0x4D;
+    reportindex = find_ctic_index(localnode(),UUID_2,uuid);
+    if(reportindex < 0)
+      {
+      printf("Failed to find Volume Report characteristic\n");
+      return(0);
+      }
+    reportindex += 2;  // Volume is Report 3, after Keyboard and Mouse
+    }
+
+  buf[0] = 0;
+  if(key == KEY_VOLUMEUP)
+    buf[0] = 0x01;
+  else if(key == KEY_VOLUMEDOWN)
+    buf[0] = 0x02;
+  else if(key == KEY_MUTE)
+    buf[0] = 0x04;
+  else
+    return(0);
+  write_ctic(localnode(),reportindex,buf,0);
+
+  buf[0] = 0;
+  write_ctic(localnode(),reportindex,buf,0);
+  return(1);
+  }
+
 void read_keyboard(void)
   {
   int nread,n,usage,slot,changed;
@@ -437,6 +499,36 @@ void read_keyboard(void)
       }
     if(changed)
       send_keyboard_report();
+    }
+  }
+
+void read_volume(void)
+  {
+  int nread;
+  struct input_event event;
+
+  if(volume_fd < 0)
+    return;
+
+  while(1)
+    {
+    nread = read(volume_fd,&event,sizeof(event));
+    if(nread < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      break;
+    if(nread < 0 && errno == EINTR)
+      continue;
+    if(nread != sizeof(event))
+      {
+      if(nread < 0)
+        printf("Read failed on %s: %s\n",VOLUME_DEVICE,strerror(errno));
+      else
+        printf("Unexpected end of input from %s\n",VOLUME_DEVICE);
+      close(volume_fd);
+      volume_fd = -1;
+      break;
+      }
+    if(event.type == EV_KEY && event.value != 0)
+      send_volume_report(event.code);
     }
   }
 

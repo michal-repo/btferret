@@ -10,6 +10,7 @@ DEVICE = My Pi   TYPE=Mesh  node=1  ADDRESS = LOCAL
     LECHAR=Protocol Mode   SIZE=1  Permit=06  UUID=2A4E  
     LECHAR=HID Info        SIZE=4  Permit=02  UUID=2A4A  
     LECHAR=HID Ctl Point   SIZE=8  Permit=04  UUID=2A4C   
-    LECHAR=Report Map      SIZE=101 Permit=02  UUID=2A4B  
+    LECHAR=Report Map      SIZE=132 Permit=02  UUID=2A4B  
     LECHAR=Key report      SIZE=8  Permit=92  UUID=2A4D  
     LECHAR=Mouse report    SIZE=4  Permit=92  UUID=2A4D  
+    LECHAR=Volume report   SIZE=1  Permit=92  UUID=2A4D
