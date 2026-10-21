@@ -24,6 +24,7 @@ Connect from phone/tablet/PC to "HID" device
 
 Keystrokes and mouse data sent to client
 F10 sends "Hello" plus Enter
+The mouse moves slightly right, left, up and down every 20 seconds
 
 This code sets an unchanging random address.
 If connection is unreliable try changing the address.
@@ -46,19 +47,20 @@ more infomation.
 
 int lecallback(int clientnode,int op,int cticn);
 int send_key(int key);
-int send_mouse(char x,char y,char but);
+int send_mouse(char x,char y,char but,char wheel);
 
 #define KEYBOARD_DEVICE "/dev/input/by-id/usb-SteelSeries_SteelSeries_Apex_3-event-kbd"
 #define MOUSE_DEVICE "/dev/input/by-id/usb-SteelSeries_SteelSeries_Prime-if01-event-mouse"
 #define INPUT_RETRY_TICKS 50
+#define MOUSE_JIGGLE_INTERVAL_TICKS 1000
 
-unsigned char reportmap[99] = {0x05,0x01,0x09,0x06,0xA1,0x01,0x85,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,
+unsigned char reportmap[101] = {0x05,0x01,0x09,0x06,0xA1,0x01,0x85,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,
                                0x25,0x01,0x75,0x01,0x95,0x08,0x81,0x02,0x95,0x01,0x75,0x08,0x81,0x01,0x95,0x06,
                                0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,0x19,0x00,0x29,0x65,0x81,0x00,0xC0,
                                0x05,0x01,0x09,0x02,0xA1,0x01,0x85,0x02,0x09,0x01,0xA1,0x00,0x05,0x09,0x19,0x01,
-                               0x29,0x03,0x15,0x00,0x25,0x01,0x95,0x03,0x75,0x01,0x81,0x02,0x95,0x01,0x75,0x05,
-                               0x81,0x01,0x05,0x01,0x09,0x30,0x09,0x31,0x15,0x81,0x25,0x7F,0x75,0x08,0x95,0x02,
-                               0x81,0x06,0xC0,0xC0};
+                               0x29,0x05,0x15,0x00,0x25,0x01,0x95,0x05,0x75,0x01,0x81,0x02,0x95,0x01,0x75,0x03,
+                               0x81,0x01,0x05,0x01,0x09,0x30,0x09,0x31,0x09,0x38,0x15,0x81,0x25,0x7F,0x75,0x08,
+                               0x95,0x03,0x81,0x06,0xC0,0xC0};
 
 unsigned char report[8] = {0,0,0,0,0,0,0,0};
 unsigned char *name = "HID"; 
@@ -71,11 +73,13 @@ unsigned char keyboard_modifiers = 0;
 unsigned char keyboard_keys[6] = {0,0,0,0,0,0};
 unsigned char mouse_buttons = 0;
 int keyboard_retry_ticks = 0,mouse_retry_ticks = 0;
+int mouse_jiggle_ticks = 0,mouse_jiggle_step = 0;
 
 int linux_key_to_hid(int key);
 int send_keyboard_report(void);
 void read_keyboard(void);
 void read_mouse(void);
+void jiggle_mouse(void);
 void close_input_devices(void);
 void open_input_devices(int log_failures);
 void retry_input_devices(void);
@@ -168,6 +172,7 @@ int lecallback(int clientnode,int op,int cticn)
     retry_input_devices();
     read_keyboard();
     read_mouse();
+    jiggle_mouse();
     }
   if(op == LE_DISCONNECT)
     {
@@ -190,6 +195,8 @@ void close_input_devices(void)
   keyboard_modifiers = 0;
   memset(keyboard_keys,0,sizeof(keyboard_keys));
   mouse_buttons = 0;
+  mouse_jiggle_ticks = 0;
+  mouse_jiggle_step = 0;
   }
 
 void open_input_devices(int log_failures)
@@ -435,7 +442,11 @@ void read_keyboard(void)
 
 void read_mouse(void)
   {
-  int nread,dx = 0,dy = 0,changed = 0;
+  int nread,dx = 0,dy = 0,dwheel = 0,changed = 0;
+#ifdef REL_WHEEL_HI_RES
+  int hires_wheel = 0,hires_seen = 0;
+  static int hires_wheel_remainder = 0;
+#endif
   struct input_event event;
 
   if(mouse_fd < 0)
@@ -457,7 +468,7 @@ void read_mouse(void)
       close(mouse_fd);
       mouse_fd = -1;
       mouse_buttons = 0;
-      send_mouse(0,0,0);
+      send_mouse(0,0,0,0);
       return;
       }
     if(event.type == EV_REL)
@@ -466,6 +477,15 @@ void read_mouse(void)
         dx += event.value;
       else if(event.code == REL_Y)
         dy += event.value;
+      else if(event.code == REL_WHEEL)
+        dwheel += event.value;
+#ifdef REL_WHEEL_HI_RES
+      else if(event.code == REL_WHEEL_HI_RES)
+        {
+        hires_wheel += event.value;
+        hires_seen = 1;
+        }
+#endif
       }
     else if(event.type == EV_KEY)
       {
@@ -487,16 +507,59 @@ void read_mouse(void)
         else mouse_buttons &= (unsigned char)~4;
         changed = 1;
         }
+      else if(event.code == BTN_SIDE)
+        {
+        if(event.value) mouse_buttons |= 8;
+        else mouse_buttons &= (unsigned char)~8;
+        changed = 1;
+        }
+      else if(event.code == BTN_EXTRA)
+        {
+        if(event.value) mouse_buttons |= 16;
+        else mouse_buttons &= (unsigned char)~16;
+        changed = 1;
+        }
       }
     }
-  if(dx != 0 || dy != 0 || changed)
+#ifdef REL_WHEEL_HI_RES
+  if(hires_seen)
+    {
+    hires_wheel += hires_wheel_remainder;
+    dwheel = hires_wheel / 120;
+    hires_wheel_remainder = hires_wheel % 120;
+    }
+#endif
+  if(dx != 0 || dy != 0 || dwheel != 0 || changed)
     {
     if(dx > 127) dx = 127;
     else if(dx < -127) dx = -127;
     if(dy > 127) dy = 127;
     else if(dy < -127) dy = -127;
-    send_mouse((char)dx,(char)dy,mouse_buttons);
+    if(dwheel > 127) dwheel = 127;
+    else if(dwheel < -127) dwheel = -127;
+    send_mouse((char)dx,(char)dy,mouse_buttons,(char)dwheel);
     }
+  }
+
+void jiggle_mouse(void)
+  {
+  if(mouse_jiggle_step == 0)
+    {
+    if(++mouse_jiggle_ticks < MOUSE_JIGGLE_INTERVAL_TICKS)
+      return;
+    mouse_jiggle_ticks = 0;
+    mouse_jiggle_step = 1;
+    }
+
+  switch(mouse_jiggle_step)
+    {
+    case 1: send_mouse(1,0,(char)mouse_buttons,0); break;
+    case 2: send_mouse(-1,0,(char)mouse_buttons,0); break;
+    case 3: send_mouse(0,-1,(char)mouse_buttons,0); break;
+    case 4: send_mouse(0,1,(char)mouse_buttons,0); break;
+    }
+  if(++mouse_jiggle_step > 4)
+    mouse_jiggle_step = 0;
   }
 
 /*********** SEND KEY *****************
@@ -577,18 +640,21 @@ int send_key(int key)
 
 /*********** SEND MOUSE *********
 x,y = mouse movement -127 to 127
+wheel = vertical scrolling -127 to 127
 
 but  1 = Left button click
      2 = Right button click
      4 = Middle button click
+     8 = Side button click
+    16 = Extra button click
   
   For a single click these button presses are followed
   by a buf[0]=0 send which indicates button up.      
 ********************************/
 
-int send_mouse(char x,char y,char but)
+int send_mouse(char x,char y,char but,char wheel)
   {
-  unsigned char buf[3];
+  unsigned char buf[4];
   static int reportindex = -1;
   
   if(reportindex < 0)
@@ -607,6 +673,7 @@ int send_mouse(char x,char y,char but)
   buf[0] = but;
   buf[1] = x;
   buf[2] = y;
+  buf[3] = wheel;
         
   // send to Report2
   write_ctic(localnode(),reportindex,buf,0);

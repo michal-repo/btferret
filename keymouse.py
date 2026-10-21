@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import btfpy
 import os
+import struct
 
 # ********** Bluetooth keyboard and mouse **********
 # From https://github.com/petzval/btferret
@@ -24,7 +25,7 @@ import os
 # F10 sends "Hello" plus Enter
 # ESC stops the server 
 #
-# Mouse movements and button clicks go to client
+# Mouse movements, scrolling and button clicks go to client
 #
 # Note: This code uses the lowest level of security.
 # Do not use it if you need high security.
@@ -48,15 +49,15 @@ import os
 #
 # ********************************    
 
-    # NOTE the size of reportmap (99 in this case) must appear in keymouse.txt as follows:
-    #   LECHAR=Report Map      SIZE=99 Permit=02  UUID=2A4B  
+    # NOTE the size of reportmap (101 in this case) must appear in keymouse.txt as follows:
+    #   LECHAR=Report Map      SIZE=101 Permit=02  UUID=2A4B  
 reportmap = [0x05,0x01,0x09,0x06,0xA1,0x01,0x85,0x01,0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,\
              0x25,0x01,0x75,0x01,0x95,0x08,0x81,0x02,0x95,0x01,0x75,0x08,0x81,0x01,0x95,0x06,\
              0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,0x19,0x00,0x29,0x65,0x81,0x00,0xC0,\
              0x05,0x01,0x09,0x02,0xA1,0x01,0x85,0x02,0x09,0x01,0xA1,0x00,0x05,0x09,0x19,0x01,\
              0x29,0x03,0x15,0x00,0x25,0x01,0x95,0x03,0x75,0x01,0x81,0x02,0x95,0x01,0x75,0x05,\
-             0x81,0x01,0x05,0x01,0x09,0x30,0x09,0x31,0x15,0x81,0x25,0x7F,0x75,0x08,0x95,0x02,\
-             0x81,0x06,0xC0,0xC0]
+             0x81,0x01,0x05,0x01,0x09,0x30,0x09,0x31,0x09,0x38,0x15,0x81,0x25,0x7F,0x75,0x08,\
+             0x95,0x03,0x81,0x06,0xC0,0xC0]
 
     # NOTE the size of report (8 in this case) must appear in keymouse.txt as follows:
     #   LECHAR=Report1         SIZE=8  Permit=92  UUID=2A4D  
@@ -71,30 +72,103 @@ battery = [100]
 reportindex = -1
 node = 0
 fd = None
+MOUSE_DEVICE = '/dev/input/by-id/usb-SteelSeries_SteelSeries_Prime-if01-event-mouse'
+INPUT_EVENT = struct.Struct('@llHHi')
+EV_KEY = 1
+EV_REL = 2
+REL_X = 0
+REL_Y = 1
+REL_WHEEL = 8
+REL_WHEEL_HI_RES = 11
+BTN_LEFT = 0x110
+BTN_RIGHT = 0x111
+BTN_MIDDLE = 0x112
+mouse_buttons = 0
+hires_wheel_remainder = 0
 
 def lecallback(clientnode,op,cticn):
-  global fd
+  global fd,mouse_buttons,hires_wheel_remainder
       
   if(op == btfpy.LE_CONNECT):
-    fd = open('/dev/input/mouse0','rb')
-    if(fd == None):
-      print("Connected OK. Keys to client. Fail to open /dev/input/mouse0. ESC stops server")
-    else: 
+    if(fd != None):
+      os.close(fd)
+    try:
+      fd = os.open(MOUSE_DEVICE,os.O_RDONLY | os.O_NONBLOCK)
+      mouse_buttons = 0
+      hires_wheel_remainder = 0
+      print("Opened mouse input " + MOUSE_DEVICE)
       print("Connected OK. Keys/Mouse sent to client. ESC stops server")
-      os.set_blocking(fd.fileno(),False)
+    except OSError as error:
+      fd = None
+      print("Connected OK. Failed to open " + MOUSE_DEVICE + ": " + str(error))
     print("F10 sends Hello plus Enter")
  
   if(op == btfpy.LE_KEYPRESS):
     # cticn = ASCII code of key OR btferret custom code
     send_key(cticn)      
  
-  if(fd != None and op == btfpy.LE_TIMER):   
-    buf = fd.read(3)
-    if(buf != None and len(buf) == 3):
-      send_mouse(buf[1],-buf[2],buf[0])      
-      # OR if Y is reversed  send_mouse(buf[1],buf[2],buf[0])
+  if(fd != None and op == btfpy.LE_TIMER):
+    dx = 0
+    dy = 0
+    wheel = 0
+    hires_wheel = 0
+    hires_seen = False
+    changed = False
+    while(True):
+      try:
+        data = os.read(fd,INPUT_EVENT.size * 64)
+      except BlockingIOError:
+        break
+      except OSError as error:
+        os.close(fd)
+        fd = None
+        mouse_buttons = 0
+        print("Read failed on " + MOUSE_DEVICE + ": " + str(error))
+        break
+      if(not data):
+        os.close(fd)
+        fd = None
+        mouse_buttons = 0
+        print("Mouse input closed: " + MOUSE_DEVICE)
+        break
+      event_count = len(data) // INPUT_EVENT.size
+      for index in range(event_count):
+        _,_,event_type,event_code,event_value = INPUT_EVENT.unpack_from(data,index * INPUT_EVENT.size)
+        if(event_type == EV_REL):
+          if(event_code == REL_X):
+            dx += event_value
+          elif(event_code == REL_Y):
+            dy += event_value
+          elif(event_code == REL_WHEEL):
+            wheel += event_value
+          elif(event_code == REL_WHEEL_HI_RES):
+            hires_wheel += event_value
+            hires_seen = True
+        elif(event_type == EV_KEY):
+          button = 0
+          if(event_code == BTN_LEFT):
+            button = 1
+          elif(event_code == BTN_RIGHT):
+            button = 2
+          elif(event_code == BTN_MIDDLE):
+            button = 4
+          if(button):
+            if(event_value):
+              mouse_buttons |= button
+            else:
+              mouse_buttons &= ~button
+            changed = True
+    if(hires_seen):
+      hires_wheel += hires_wheel_remainder
+      wheel = int(hires_wheel / 120)
+      hires_wheel_remainder = hires_wheel - wheel * 120
+    if(dx != 0 or dy != 0 or wheel != 0 or changed):
+      send_mouse(max(-127,min(127,dx)),max(-127,min(127,dy)),mouse_buttons,max(-127,min(127,wheel)))
 
   if(op == btfpy.LE_DISCONNECT):
+    if(fd != None):
+      os.close(fd)
+      fd = None
     return(btfpy.SERVER_EXIT)
   return(btfpy.SERVER_CONTINUE)
  
@@ -168,7 +242,7 @@ def send_key(key):
 #      
 #********************************/
 
-def send_mouse(x,y,but):
+def send_mouse(x,y,but,wheel=0):
   global reportindex
   global node
 
@@ -182,9 +256,14 @@ def send_mouse(x,y,but):
     uy = y + 256
   else:
     uy = y
+
+  if(wheel < 0):
+    uwheel = wheel + 256
+  else:
+    uwheel = wheel
            
   # send to Report2
-  btfpy.Write_ctic(node,reportindex+1,[but,ux,uy],0)
+  btfpy.Write_ctic(node,reportindex+1,[but,ux,uy,uwheel],0)
  
   return
 
